@@ -1,68 +1,103 @@
 # 📦 CF-Workers-GitHub
 ![img](./img.png)
-## 📝 简介
-github release、archive以及项目文件的加速项目，支持clone，Cloudflare Workers & Pages 版本
+
+基于 Cloudflare Workers / Pages 的 GitHub 镜像代理：加速 release、archive、raw 文件、Gist 与 `git clone`，并提供一个带 Bing 每日壁纸的首页。
 
 > [!CAUTION]
-> **Github.fxxk.dedyn.io 已被GFW污染，生产环境建议自行部署服务。**
+> 上游演示域名 **Github.fxxk.dedyn.io 已被 GFW 污染**，生产环境请自行部署。
 
 > [!WARNING]
-> 项目可能会触发**疑似钓鱼网站**警告或域名封禁，请通过环境变量 `URL` 赋值 **nginx** 或 `URL302` 设置302跳转域名进行伪装。
+> 伪装（`URL=nginx` / `URL302`）与壁纸首页**互斥**——设了伪装就永远轮不到首页。详见下方「处理优先级」。
 
 ## 🚀 使用
 
-直接在copy出来的url前加`https://github.fxxk.dedyn.io/`即可
+域名后面直接拼 GitHub 链接即可（协议头可省略，`http://` 会自动转成 `https://`）：
 
-也可以直接访问，在input输入
+```
+https://<你的域名>/https://github.com/<user>/<repo>/releases/download/<tag>/<file>.zip
+```
 
-***大量使用请自行部署，以上域名仅为演示使用。***
+**实际支持的路径**（超出下面这些会落到首页，不会被代理）：
 
-访问私有仓库可以通过
+| 用途 | 路径 |
+|---|---|
+| 分支 / release 压缩包 | `github.com/<u>/<r>/archive/<ref>.zip`、`.../releases/download/<tag>/<f>` |
+| 仓库文件 | `github.com/<u>/<r>/blob/<ref>/<path>`（自动改写为 `/raw/`） |
+| git clone | `github.com/<u>/<r>.git/info/refs?service=git-upload-pack`、`.../git-upload-pack` |
+| raw 文件 | `raw.githubusercontent.com/<u>/<r>/<ref>/<path>` |
+| Gist | `gist.githubusercontent.com/<u>/<id>/raw/<path>` |
+| tags | `github.com/<u>/<r>/tags` |
 
-`git clone https://user:TOKEN@github.fxxk.dedyn.io/https://github.com/xxxx/xxxx` [#71](https://github.com/hunshcn/gh-proxy/issues/71)
+访问私有仓库：
 
-以下都是合法输入（仅示例，文件不存在）：
+```
+git clone https://user:TOKEN@<你的域名>/https://github.com/<u>/<r>.git
+```
 
-- 分支源码：https://github.com/hunshcn/project/archive/master.zip
+首页输入框粘贴链接后会**新开标签页**访问；也可手动用 `/?q=<GitHub链接>`（**该入口只在首页生效**）。
 
-- release源码：https://github.com/hunshcn/project/archive/v0.1.0.tar.gz
+## 📦 部署
 
-- release文件：https://github.com/hunshcn/project/releases/download/v0.1.0/example.zip
+### 方式一：上传压缩包（最省事）
 
-- 分支文件：https://github.com/hunshcn/project/blob/master/filename
+在**仓库根目录**打包 —— `_worker.js` 必须位于压缩包最外层，多包一层文件夹就不会被识别：
 
-- commit文件：https://github.com/hunshcn/project/blob/1111111111111111111111111111/filename
+```bash
+zip -r site.zip . -x '.git/*'
+```
 
-- gist：https://gist.githubusercontent.com/cielpy/351557e6e465c12986419ac5a4dd2568/raw/cmd.py
+Workers & Pages → Create application → **Drag and drop your files** → 上传 zip → Deploy site。
 
-## 📄 Pages Github 部署
+> 拖拽限制：1000 个文件 / 单文件 25 MiB
 
-### 1️⃣ 部署 Cloudflare Pages：
-   - 在 Github 上先 Fork 本项目，并点上 Star !!!
-   - 在 Cloudflare Pages 控制台中选择 `连接到 Git`后，选中 `CF-Workers-GitHub`项目后点击 `开始设置`。
-     
-### 2️⃣ 给 Pages绑定 自定义域：
-   - 在 Pages控制台的 `自定义域`选项卡，下方点击 `设置自定义域`。
-   - 填入你的自定义次级域名，注意不要使用你的根域名，例如：
-     您分配到的域名是 `fxxk.dedyn.io`，则添加自定义域填入 `github.fxxk.dedyn.io`即可；
-   - 按照 Cloudflare 的要求将返回你的域名DNS服务商，添加 该自定义域 `github`的 CNAME记录 `CF-Workers-GitHub.pages.dev` 后，点击 `激活域`即可。
+### 方式二：连接到 Git
 
-## 👷 Workers 部署方法
-### ☁️ 部署 Cloudflare Worker：
+Workers & Pages → Create application → **Connect to Git** → 选中本仓库 → Build command 留空、Output directory 填 `/` → 部署。之后每次 push 自动更新。
 
-   - 在 Cloudflare Worker 控制台中创建一个新的 Worker。
-   - 将 [_worker.js](https://github.com/cmliu/CF-Workers-GitHub/blob/main/_worker.js)  的内容粘贴到 Worker 编辑器中。
+### 方式三：Workers 编辑器
 
-## 🔧 变量说明
-| 变量名 | 示例 | 必填 | 备注 |
-|--|--|--|--|
-| URL | `https://www.baidu.com/` |❌| 主页伪装(设为`nginx`则伪装为nginx默认页面) |
-| URL302 | `https://t.me/CMLiussss` |❌| 主页302跳转 |
-| UA | `curl,wget,SomeBot` |❌| 额外的爬虫UA黑名单，命中后返回nginx伪装页（不区分大小写，用空格/制表符/竖线/逗号/换行分隔） |
-| BG_INTERVAL | `8000` |❌| 首页壁纸轮播间隔，单位毫秒，默认 `12000`，有效范围 `3000`~`600000`（越界自动收敛） |
-| BG_OPACITY | `0.6` |❌| 首页壁纸透明度，默认 `1`，有效范围 `0`~`1`（非法值回落默认） |
+新建 Worker → 将 [`_worker.js`](./_worker.js) 全文粘贴进编辑器 → Deploy。
 
-> 首页背景为 Bing 每日壁纸轮播，取不到时自动回退到默认深色渐变背景，不影响使用。
+### 绑定自定义域
+
+项目 → Domains & Policies → Set up a custom domain，按提示到域名 DNS 服务商添加一条指向 `<项目名>.pages.dev` 的 CNAME。
+
+## 🔧 环境变量
+
+项目 → **Settings → Environment variables**。运行时读取，一般**改完即可生效、无需重新部署**（若没变化稍等片刻或重新 Deploy 一次）。
+注意 Production / Preview 是两套独立作用域，自定义域名走的是 **Production**。
+
+| 变量 | 示例 | 默认 | 说明 |
+|---|---|---|---|
+| `URL` | `nginx` / `https://example.com/` | 空 | 主页伪装：`nginx` 返回内置伪装页；填其它地址则把首页反代过去 |
+| `URL302` | `https://t.me/xxx` | 空 | 首页 302 跳转，**优先级高于 `URL`** |
+| `UA` | `curl,wget,SomeBot` | 内置 `netcraft` | 追加的爬虫 UA 黑名单，命中返回伪装页（不区分大小写，空格/制表符/竖线/逗号/换行分隔） |
+| `BG_INTERVAL` | `8000` | `12000` | 首页壁纸轮播间隔，单位毫秒，有效 `3000`~`600000`（越界自动收敛） |
+| `BG_OPACITY` | `0.6` | `1` | 首页壁纸透明度，有效 `0`~`1`（非法值回落默认） |
+
+### 处理优先级
+
+```
+UA 命中 → ?q= 301 → /favicon.ico → 代理匹配 → URL302 → URL → 壁纸首页
+```
+
+**要看到壁纸首页：`URL` 和 `URL302` 必须都为空。** 这是最常踩的坑——旧版文档建议用 `URL=nginx` 做伪装，一旦设上，首页分支就永远执行不到。
+
+## 📌 实际行为说明
+
+- **首页**：服务端拉取 Bing 每日壁纸（8 张），双图层交叉淡入 + 缓慢推近；接口失败时静默回退到深色渐变背景，不影响使用。结果服务端缓存 30 分钟，失败后 60 秒内不重试，单次回源 3 秒超时。
+- **`/favicon.ico`** 由 Worker 内置返回（`Cache-Control: public, max-age=86400`）。
+- **不会回传压缩包里的静态文件**：Worker 未接入 `env.ASSETS`，除上述代理路径和 favicon 外，其余路径全部落到首页分支。
+- `PREFIX`、`Config.jsdelivr`、`whiteList` 是 `_worker.js` 顶部的**源码常量**，改完需重新部署；`PREFIX` 必须以 `/` 结尾。
+  - `Config.jsdelivr = 1` → `blob` 链接 302 到 jsDelivr（默认 `0`，改为 `/raw/` 后代理）
+  - `whiteList` 非空 → 路径必须包含其中某个片段，否则返回 403
+- 跟随跨源重定向时会丢弃 `Authorization` / `Cookie`（避免凭据外泄），最多跟随 10 次重定向。
+
+## 🧪 测试
+
+```bash
+node test/harness.mjs   # 42/42，零依赖
+```
 
 # 🙏 致谢
 [gh-proxy](https://github.com/hunshcn/gh-proxy)、[jsproxy](https://github.com/EtherDream/jsproxy/)
