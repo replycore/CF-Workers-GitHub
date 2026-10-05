@@ -729,7 +729,7 @@ const HOMEPAGE_HTML = `
 				</form>
 
 				<div class="tips">
-					<p>✨ 支持带协议头(https://)或不带的GitHub链接，更多用法见<a href="https://hunsh.net/archives/23/">文档说明</a></p>
+					<p>✨ 支持带协议头(https://)或不带的GitHub链接</p>
 					<p>🚀 release、archive使用cf加速，文件会跳转至JsDelivr</p>
 					<p>⚠️ 注意：暂不支持文件夹下载</p>
 				</div>
