@@ -255,6 +255,111 @@ async function proxy(urlObj, reqInit, depth = 0) {
 	}) // 返回新的响应
 }
 
+// ---- Bing 每日壁纸（只作用于默认首页，代理 / 伪装页逻辑完全不碰） ----
+const BING_API = 'https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=8&mkt=zh-CN'
+const BING_BASE = 'https://www.bing.com'
+const WALLPAPER_MARK = '/*__WALLPAPERS__*/[]' // 首页里的占位表达式，默认就是一个空数组
+const WALLPAPER_CFG_MARK = '/*__WALLPAPER_CFG__*/{"interval":12000,"opacity":1}' // 同上，默认配置
+const WALLPAPER_OK_TTL = 30 * 60 * 1000 // 成功结果缓存 30 分钟（Bing 每天更新一次，够用）
+const WALLPAPER_FAIL_TTL = 60 * 1000 // 失败也写缓存（负缓存）：1 分钟内不再回源，降级路径才够快。
+// 不要调太长——实测 Bing 偶发抖动一次就会让整页没壁纸，60s 足够防打爆又能在下次访问自愈。
+const WALLPAPER_TIMEOUT = 3000 // 单次回源上限，避免 Bing 卡住时首页跟着卡
+const BG_INTERVAL_DEFAULT = 12000 // 轮播间隔默认 12s
+const BG_INTERVAL_MIN = 3000 // 下限：再小会跟 1.6s 的交叉淡入打架，也容易刷定时器
+const BG_INTERVAL_MAX = 600000 // 上限 10 分钟
+
+// 模块级缓存：{ at, list }，list 为 null 表示上次失败。isolate 跨请求复用，状态有界。
+let wallpaperCache = { at: 0, list: null }
+// 渲染结果缓存：同一份「壁纸数据 + 配置」只对 HOMEPAGE_HTML 做一次 replace
+let homepageHTML = null
+let homepageHTMLKey = null
+
+/**
+ * 读取背景相关的环境变量，空值 / 非数字 / 越界一律回落到安全的默认值。
+ * BG_INTERVAL - 轮播间隔，单位毫秒
+ * BG_OPACITY  - 壁纸透明度，0~1
+ * @param {object} env
+ */
+function bgConfig(env) {
+	const pick = (raw, fallback, min, max) => {
+		if (raw === undefined || raw === null || raw === '') return fallback
+		const n = Number(raw)
+		if (!Number.isFinite(n)) return fallback
+		return Math.min(max, Math.max(min, n))
+	}
+	return {
+		interval: Math.round(pick(env && env.BG_INTERVAL, BG_INTERVAL_DEFAULT, BG_INTERVAL_MIN, BG_INTERVAL_MAX)),
+		opacity: Math.round(pick(env && env.BG_OPACITY, 1, 0, 1) * 1000) / 1000, // 保留 3 位小数，够用且序列化稳定
+	}
+}
+
+/**
+ * 拉取 Bing 每日壁纸列表。任何失败都静默降级为 null，不影响首页可用性。
+ * @returns {Promise<{url: string, copyright: string}[]|null>}
+ */
+async function getWallpapers() {
+	const now = Date.now()
+	const ttl = wallpaperCache.list ? WALLPAPER_OK_TTL : WALLPAPER_FAIL_TTL
+	if (wallpaperCache.at && now - wallpaperCache.at < ttl) return wallpaperCache.list
+
+	let list = null
+	try {
+		const res = await fetch(BING_API, {
+			signal: AbortSignal.timeout(WALLPAPER_TIMEOUT),
+			// 让这次请求尽量命中 CF 边缘缓存，别每个访客都回源 Bing
+			cf: { cacheEverything: true, cacheTtl: 3600 },
+		})
+		if (res.ok) {
+			const data = await res.json()
+			list = (Array.isArray(data.images) ? data.images : [])
+				.filter(img => img && typeof img.url === 'string' && img.url.length > 0)
+				.map(img => ({
+					// 接口给的是站内相对路径，补全域名
+					url: /^https?:\/\//i.test(img.url) ? img.url : BING_BASE + img.url,
+					copyright: typeof img.copyright === 'string' ? img.copyright : '',
+				}))
+		}
+	} catch (err) {
+		list = null // 网络错误 / 超时 / JSON 解析失败，一律当没有壁纸
+	}
+	wallpaperCache = { at: now, list }
+	return list
+}
+
+/**
+ * 把任意 JSON 值序列化成可以安全塞进 <script> 的文本。
+ * 必须转义 <，否则 copyright 里的 </script> 会提前闭合标签；
+ * U+2028/U+2029 在部分老引擎的脚本里是非法字符。
+ * @param {any} value
+ */
+function embedJSON(value) {
+	return JSON.stringify(value)
+		.replace(/</g, '\\u003c')
+		.replace(/\u2028/g, '\\u2028')
+		.replace(/\u2029/g, '\\u2029')
+}
+
+/**
+ * 渲染首页。没有壁纸时直接返回原常量（零分配、零拷贝）；
+ * 有壁纸时只替换掉模板里的占位表达式，不重新拼整份 HTML。
+ * @param {{url: string, copyright: string}[]|null} list
+ * @param {{interval: number, opacity: number}} cfg
+ */
+function homepage(list, cfg) {
+	if (!list || list.length === 0) return HOMEPAGE_HTML
+	const data = embedJSON(list)
+	const conf = embedJSON(cfg)
+	const key = data + '\u0000' + conf
+	if (key !== homepageHTMLKey) {
+		homepageHTMLKey = key
+		// 用函数形式的 replacer，避免 JSON 里的 $& 被 String.replace 当成替换模式
+		homepageHTML = HOMEPAGE_HTML
+			.replace(WALLPAPER_MARK, () => data)
+			.replace(WALLPAPER_CFG_MARK, () => conf)
+	}
+	return homepageHTML
+}
+
 /**
  * 主要的请求处理函数
  * @param {Request} request - 原始请求对象
@@ -321,7 +426,8 @@ export default {
 			}
 			return fetch(new Request(env.URL, request));
 		}
-		return new Response(HOMEPAGE_HTML, {
+		// 默认首页：Bing 每日壁纸轮播，拿不到就原样返回静态首页（等价于回退到深色渐变背景）
+		return new Response(homepage(await getWallpapers(), bgConfig(env)), {
 			headers: {
 				'Content-Type': 'text/html; charset=UTF-8',
 			},
@@ -373,6 +479,9 @@ const HOMEPAGE_HTML = `
 					max-width: 800px;
 					padding: 40px 20px;
 					text-align: center;
+					/* 壁纸是 fixed 层（z-index:0），内容必须抬一层才不会被盖住 */
+					position: relative;
+					z-index: 2;
 				}
 
 				.title {
@@ -532,6 +641,64 @@ const HOMEPAGE_HTML = `
 					40%, 80% { transform: rotate(10deg); }
 				}
 
+				/* ---- Bing 每日壁纸轮播 ---- */
+
+				#wallpaper {
+					position: fixed;
+					inset: 0;
+					z-index: 0;
+					overflow: hidden;
+					pointer-events: none;
+					/* 拿不到壁纸时保持隐藏，露出 body 上原有的深色渐变 */
+					display: none;
+				}
+
+				.wallpaper-layer {
+					position: absolute;
+					inset: 0;
+					background-position: center;
+					background-size: cover;
+					background-repeat: no-repeat;
+					opacity: 0;
+					transform: scale(1);
+					transform-origin: center center;
+					/* 缩放时长跟展示时长一致，正好在下一次切换时推到位（Ken Burns） */
+					transition: opacity 1.6s ease-in-out,
+						transform var(--wallpaper-zoom-ms, 12000ms) ease-out;
+					will-change: opacity, transform;
+				}
+
+				.wallpaper-layer.is-active {
+					/* 透明度由环境变量 BG_OPACITY 决定，默认 1 */
+					opacity: var(--wallpaper-opacity, 1);
+					transform: scale(1.045);
+				}
+
+				/* 半透明暗色遮罩，保证标题 / 输入框 / 示例文字清晰可读 */
+				.wallpaper-mask {
+					position: absolute;
+					inset: 0;
+					/* 图层会被脚本设成 z-index 1/2，遮罩和说明文字必须压在它们上面 */
+					z-index: 3;
+					background: linear-gradient(180deg, rgba(13, 17, 23, 0.70) 0%, rgba(13, 17, 23, 0.82) 100%);
+				}
+
+				.wallpaper-credit {
+					position: absolute;
+					right: 14px;
+					bottom: 12px;
+					z-index: 4;
+					max-width: min(70vw, 520px);
+					padding: 4px 10px;
+					border-radius: 6px;
+					background: rgba(13, 17, 23, 0.55);
+					color: rgba(240, 246, 252, 0.85);
+					font-size: 0.75rem;
+					line-height: 1.4;
+					text-align: right;
+					word-break: break-word;
+				}
+
 				@media (max-width: 640px) {
 					.container {
 						padding: 20px;
@@ -570,10 +737,23 @@ const HOMEPAGE_HTML = `
 						width: 60px;
 						height: 60px;
 					}
+
+					.wallpaper-credit {
+						font-size: 0.7rem;
+						right: 10px;
+						bottom: 8px;
+					}
 				}
 			</style>
 		</head>
 		<body>
+			<!-- Bing 每日壁纸：没有壁纸数据时整块保持 display:none，页面回退到原有深色渐变 -->
+			<div id="wallpaper" aria-hidden="true">
+				<div class="wallpaper-layer" id="wallpaper-a"></div>
+				<div class="wallpaper-layer" id="wallpaper-b"></div>
+				<div class="wallpaper-mask"></div>
+				<div class="wallpaper-credit" id="wallpaper-credit"></div>
+			</div>
 			<a href="https://github.com/cmliu/CF-Workers-GitHub" target="_blank" class="github-corner" aria-label="View source on Github">
 				<svg viewBox="0 0 250 250" aria-hidden="true">
 					<path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path>
@@ -624,6 +804,82 @@ const HOMEPAGE_HTML = `
 					const baseUrl = location.href.slice(0, location.href.lastIndexOf('/') + 1);
 					window.open(baseUrl + input.value);
 				}
+
+				// ---- Bing 每日壁纸轮播 ----
+				// 数据与配置都由服务端注入到下面两个占位表达式；拿不到数据时前者就是空数组，
+				// 整段直接 return，#wallpaper 保持 display:none，页面回退到原有深色渐变背景。
+				const WALLPAPERS = /*__WALLPAPERS__*/[];
+				const WALLPAPER_CFG = /*__WALLPAPER_CFG__*/{"interval":12000,"opacity":1};
+				(function () {
+					if (!Array.isArray(WALLPAPERS) || WALLPAPERS.length === 0) return;
+
+					const root = document.getElementById('wallpaper');
+					const credit = document.getElementById('wallpaper-credit');
+					const layers = [document.getElementById('wallpaper-a'), document.getElementById('wallpaper-b')];
+					if (!root || !layers[0] || !layers[1]) return;
+
+					// 服务端已经按环境变量夹过一遍，这里再兜一次底，免得注入值异常把定时器打满
+					const num = (raw, fallback, min, max) => {
+						const n = Number(raw);
+						return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+					};
+					const cfg = WALLPAPER_CFG || {};
+					const INTERVAL = num(cfg.interval, 12000, 3000, 600000); // 轮播间隔（ms）
+					const OPACITY = num(cfg.opacity, 1, 0, 1);               // 壁纸透明度 0~1
+					const FADE = 1600;      // 与 CSS 里 .wallpaper-layer 的 transition 时长保持一致
+
+					// 先下发 CSS 变量再点亮图层，避免首帧用到默认值闪一下
+					root.style.setProperty('--wallpaper-opacity', String(OPACITY));
+					root.style.setProperty('--wallpaper-zoom-ms', INTERVAL + 'ms');
+
+					const setBg = (el, item) => {
+						el.style.backgroundImage = 'url(' + JSON.stringify(item.url) + ')';
+					};
+					const setCredit = (item) => {
+						if (!credit) return;
+						credit.textContent = item.copyright || '';
+						credit.style.display = item.copyright ? 'block' : 'none';
+					};
+					// 先预加载再切换，避免淡入到一半才发现图还没到、闪出空白
+					const preload = (item) => new Promise((done) => {
+						const img = new Image();
+						img.onload = img.onerror = done;
+						img.src = item.url;
+					});
+
+					// 第一张直接铺上
+					setBg(layers[0], WALLPAPERS[0]);
+					setCredit(WALLPAPERS[0]);
+					layers[0].classList.add('is-active');
+					root.style.display = 'block';
+
+					// 只有 1 张图时不轮播（0 张在上面就 return 了）
+					if (WALLPAPERS.length < 2) return;
+
+					let cur = 0;
+					let curLayer = 0;
+					let busy = false;
+
+					async function tick() {
+						if (busy) return;
+						busy = true;
+						const next = (cur + 1) % WALLPAPERS.length;
+						await preload(WALLPAPERS[next]);
+						const inLayer = 1 - curLayer;
+						setBg(layers[inLayer], WALLPAPERS[next]);
+						// 新图叠在旧图上方淡入，交叉过渡才不会互相透底
+						layers[inLayer].style.zIndex = '2';
+						layers[curLayer].style.zIndex = '1';
+						setCredit(WALLPAPERS[next]);
+						layers[inLayer].classList.add('is-active');
+						layers[curLayer].classList.remove('is-active');
+						cur = next;
+						curLayer = inLayer;
+						setTimeout(() => { busy = false; }, FADE);
+					}
+
+					setInterval(tick, INTERVAL);
+				})();
 			</script>
 		</body>
 		</html>

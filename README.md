@@ -59,6 +59,10 @@ github release、archive以及项目文件的加速项目，支持clone，Cloudf
 | URL | `https://www.baidu.com/` |❌| 主页伪装(设为`nginx`则伪装为nginx默认页面) |
 | URL302 | `https://t.me/CMLiussss` |❌| 主页302跳转 |
 | UA | `curl,wget,SomeBot` |❌| 额外的爬虫UA黑名单，命中后返回nginx伪装页（不区分大小写，用空格/制表符/竖线/逗号/换行分隔） |
+| BG_INTERVAL | `8000` |❌| 首页壁纸轮播间隔，单位毫秒，默认 `12000`，有效范围 `3000`~`600000`（越界自动收敛） |
+| BG_OPACITY | `0.6` |❌| 首页壁纸透明度，默认 `1`，有效范围 `0`~`1`（非法值回落默认） |
+
+> 首页背景为 Bing 每日壁纸轮播，取不到时自动回退到默认深色渐变背景，不影响使用。
 
 # 🙏 致谢
 [gh-proxy](https://github.com/hunshcn/gh-proxy)、[jsproxy](https://github.com/EtherDream/jsproxy/)
